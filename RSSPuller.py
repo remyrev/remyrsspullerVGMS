@@ -1,67 +1,92 @@
-import urllib.request
+import requests
+from bs4 import BeautifulSoup
 import urllib.parse
-import re
-import xml.etree.ElementTree as ET
+import sys
 
-url = "https://www.amazon.com/gp/movers-and-shakers/videogames/ref=zg_bsms_nav_videogames_0"
-headers = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
+# --- CONFIGURATION ---
+TARGET_URL = "https://www.amazon.com/gp/movers-and-shakers/videogames/ref=zg_bsms_nav_videogames_0"
+AFFILIATE_TAG = "saintrem-20"
+# Your personal bridge page URL
+BRIDGE_BASE = "https://remyrev.github.io/remyrsspullerVGMS/redirect.html"
+OUTPUT_FILE = "my_custom_feed.xml"
 
-print("Fetching data and extracting titles...")
+def generate_amazon_feed():
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9"
+    }
 
-try:
-    req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req) as response:
-        html_data = response.read().decode('utf-8')
+    try:
+        print("Fetching Amazon Trending Games...")
+        response = requests.get(TARGET_URL, headers=headers, timeout=20)
+        response.raise_for_status()
         
-        # --- THE UPGRADED REMIX MAGIC ---
+        soup = BeautifulSoup(response.text, 'html.parser')
+        # Amazon usually keeps items in these 'p13n-grid-content' divs
+        items = soup.find_all('div', id=lambda x: x and x.startswith('p13n-asin-index-'))
         
-        # We now capture TWO groups: Group 1 is the Title Slug, Group 2 is the ID
-        regex_pattern = r'href="/([^/]+)/dp/([A-Z0-9]{10})'
-        
-        # This creates a list of pairs, e.g., [('Super-Mario', 'B0123...'), ('Zelda', 'B0987...')]
-        raw_matches = re.findall(regex_pattern, html_data)
-        
-        # Remove duplicates while keeping the pairs intact
-        unique_matches = list(set(raw_matches))
-        
-        # --- UPDATED AFFILIATE TAG ---
-        affiliate_tag = "saintrem-20"
-        
-        print(f"Found {len(unique_matches)} unique games. Building the RSS XML file...")
+        rss_items = ""
+        count = 0
 
-        # --- BUILDING THE RSS FEED ---
-        rss = ET.Element("rss", version="2.0")
-        channel = ET.SubElement(rss, "channel")
-        
-        ET.SubElement(channel, "title").text = "My Custom Amazon Video Games Feed"
-        ET.SubElement(channel, "link").text = "https://www.amazon.com"
-        ET.SubElement(channel, "description").text = "Trending video games with my custom affiliate tags."
-        
-        # We unpack our pairs into two variables: title_slug and asin
-        for title_slug, asin in unique_matches:
-            item = ET.SubElement(channel, "item")
+        for item in items:
+            if count >= 15: break # Keep it light for X
             
-            # 1. Clean up the title: Decode any URL characters (like %20) and swap dashes for spaces
-            decoded_title = urllib.parse.unquote(title_slug)
-            clean_title = decoded_title.replace('-', ' ')
-            
-            # 2. Add the real title to the feed
-            ET.SubElement(item, "title").text = clean_title
-            
-            # 3. Add the clean, remixed affiliate link
-            clean_url = f"https://www.amazon.com/dp/{asin}?tag={affiliate_tag}"
-            ET.SubElement(item, "link").text = clean_url
-            
-        # Format and save the file
-        ET.indent(rss, space="  ", level=0) 
-        tree = ET.ElementTree(rss)
-        
-        filename = "my_custom_feed.xml"
-        tree.write(filename, encoding="utf-8", xml_declaration=True)
-        
-        print(f"\nSuccess! Check '{filename}' for your real titles.")
+            try:
+                # 1. Extract Title and ASIN (Product ID)
+                title_elem = item.find('div', class_='_cDEBy_p13n-sc-css-line-clamp-3_1796V') or item.find('span')
+                title = title_elem.get_text(strip=True) if title_elem else "Great Gaming Deal"
+                
+                # Get the ASIN from the data-asin attribute or the link
+                link_elem = item.find('a', class_='a-link-normal')
+                if not link_elem: continue
+                
+                # Extract ASIN from URL
+                href = link_elem.get('href', '')
+                asin = href.split('/dp/')[1].split('/')[0] if '/dp/' in href else None
+                if not asin: continue
 
-except Exception as e:
-    print(f"\nUh oh, something went wrong: {e}")
+                # 2. CREATE THE MASK (The "Cloak")
+                # Direct Affiliate Link
+                raw_affiliate_url = f"https://www.amazon.com/dp/{asin}/?tag={AFFILIATE_TAG}"
+                
+                # URL Encode the Amazon link so it doesn't break our bridge link
+                encoded_target = urllib.parse.quote(raw_affiliate_url)
+                
+                # FINAL MASKED LINK: Your site + the target
+                masked_link = f"{BRIDGE_BASE}?target={encoded_target}"
+
+                # 3. Build RSS Item
+                rss_items += f"""
+    <item>
+      <title><![CDATA[Trending: {title}]]></title>
+      <link>{masked_link}</link>
+      <description>Amazon's current Mover & Shaker in Video Games.</description>
+    </item>"""
+                count += 1
+                
+            except Exception as e:
+                print(f"Skipping an item due to error: {e}")
+                continue
+
+        # 4. Wrap it in the XML Shell
+        rss_content = f"""<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Amazon Gaming Movers</title>
+    <link>{TARGET_URL}</link>
+    <description>Top trending game deals, masked for X.</description>
+    {rss_items}
+  </channel>
+</rss>"""
+
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(rss_content)
+        
+        print(f"Success! {OUTPUT_FILE} created with {count} masked links.")
+
+    except Exception as e:
+        print(f"CRITICAL ERROR: {e}")
+        sys.exit(1)
+
+if __name__ == "__main__":
+    generate_amazon_feed()
